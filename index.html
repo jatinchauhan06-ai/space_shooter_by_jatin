@@ -1,0 +1,792 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+  <title>NEON VOID // SPACE SHOOTER</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+      user-select: none;
+    }
+    body {
+      background: #050510;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      font-family: 'Courier New', monospace;
+      overflow: hidden;
+      touch-action: none;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      max-width: 800px;
+      height: auto;
+      aspect-ratio: 800 / 600;
+      border-radius: 16px;
+      box-shadow: 0 0 40px #00ffff33, 0 0 80px #ff00ff22;
+      cursor: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="game" width="800" height="600"></canvas>
+  <script>
+    (function(){
+      const canvas = document.getElementById('game');
+      const ctx = canvas.getContext('2d');
+
+      // ---------- FIXED DIMENSIONS ----------
+      const CW = 800, CH = 600;
+
+      // ---------- GAME STATE ----------
+      let gameState = 'start'; // 'start', 'playing', 'gameover', 'win'
+      let score = 0;
+      let wave = 1;
+      let enemiesDestroyed = 0;
+      let waveInProgress = false;
+      let waveTimer = 0;
+      let waveCooldown = 2.0; // seconds between waves
+      let bossActive = false;
+      let gameTime = 0;
+
+      // ---------- PLAYER ----------
+      const player = {
+        x: CW/2,
+        y: CH - 70,
+        radius: 14,
+        speed: 320,
+        cooldown: 0,
+        fireRate: 0.18,
+        active: true
+      };
+
+      // ---------- INPUT ----------
+      const keys = {};
+      let mouseX = null, mouseY = null;
+      let touchActive = false;
+      let touchX = 0, touchY = 0;
+
+      // ---------- BULLETS ----------
+      let bullets = [];      // player bullets
+      let enemyBullets = [];
+
+      // ---------- ENEMIES ----------
+      let enemies = [];
+      let boss = null;
+
+      // ---------- STARFIELD ----------
+      const stars = [];
+      const STAR_COUNT = 220;
+      for (let i = 0; i < STAR_COUNT; i++) {
+        stars.push({
+          x: Math.random() * CW,
+          y: Math.random() * CH,
+          radius: Math.random() * 1.8 + 0.5,
+          speed: Math.random() * 40 + 15,
+          brightness: Math.random() * 0.7 + 0.3,
+          color: ['#aaccff', '#ffffff', '#ccddff', '#ffddff', '#aaffff'][Math.floor(Math.random()*5)]
+        });
+      }
+
+      // ---------- HELPER FUNCTIONS ----------
+      function clamp(v, min, max) { return Math.max(min, Math.min(max, v)); }
+
+      // ---------- SPAWN WAVE ----------
+      function spawnWave() {
+        enemies = [];
+        boss = null;
+        bossActive = false;
+        const count = Math.min(4 + wave * 2, 16);
+        const spacing = CW / (count + 1);
+        for (let i = 0; i < count; i++) {
+          const type = Math.random() < 0.25 ? 'fast' : (Math.random() < 0.5 ? 'tank' : 'basic');
+          let hp = 1, speedY = 40 + wave * 3, speedX = 0, radius = 18, color = '#ff44aa', scoreVal = 10;
+          if (type === 'fast') {
+            hp = 1; speedY = 80 + wave * 5; radius = 14; color = '#44ffff'; scoreVal = 15;
+            speedX = (Math.random() - 0.5) * 60;
+          } else if (type === 'tank') {
+            hp = 3; speedY = 30 + wave * 2; radius = 24; color = '#ffaa00'; scoreVal = 25;
+            speedX = (Math.random() - 0.5) * 30;
+          } else {
+            hp = 1; speedY = 45 + wave * 4; radius = 18; color = '#ff44aa'; scoreVal = 10;
+            speedX = (Math.random() - 0.5) * 40;
+          }
+          enemies.push({
+            x: spacing * (i + 1) + (Math.random() - 0.5) * 30,
+            y: -40 - Math.random() * 100,
+            radius: radius,
+            hp: hp,
+            maxHp: hp,
+            speedY: speedY,
+            speedX: speedX,
+            color: color,
+            scoreVal: scoreVal,
+            type: type,
+            phase: Math.random() * Math.PI * 2,
+            shootTimer: 1.0 + Math.random() * 2.0,
+            wobble: Math.random() * 1.5 + 0.5,
+            originX: 0
+          });
+          enemies[enemies.length-1].originX = enemies[enemies.length-1].x;
+        }
+        waveInProgress = true;
+      }
+
+      function spawnBoss() {
+        bossActive = true;
+        boss = {
+          x: CW/2,
+          y: -100,
+          radius: 48,
+          hp: 25 + wave * 8,
+          maxHp: 25 + wave * 8,
+          speedY: 35,
+          speedX: 60,
+          color: '#ff00ff',
+          shootTimer: 0.8,
+          phase: 0,
+          scoreVal: 100 + wave * 20
+        };
+      }
+
+      function resetGame() {
+        gameState = 'playing';
+        score = 0;
+        wave = 1;
+        enemiesDestroyed = 0;
+        waveInProgress = false;
+        waveTimer = 1.5;
+        bossActive = false;
+        boss = null;
+        bullets = [];
+        enemyBullets = [];
+        enemies = [];
+        player.x = CW/2;
+        player.y = CH - 70;
+        player.cooldown = 0;
+        player.active = true;
+        gameTime = 0;
+      }
+
+      // ---------- UPDATE ----------
+      function update(dt) {
+        if (gameState !== 'playing') return;
+        gameTime += dt;
+
+        // ----- PLAYER MOVEMENT -----
+        let moveX = 0, moveY = 0;
+        if (keys['ArrowLeft'] || keys['KeyA']) moveX -= 1;
+        if (keys['ArrowRight'] || keys['KeyD']) moveX += 1;
+        if (keys['ArrowUp'] || keys['KeyW']) moveY -= 1;
+        if (keys['ArrowDown'] || keys['KeyS']) moveY += 1;
+        if (moveX !== 0 || moveY !== 0) {
+          const len = Math.hypot(moveX, moveY);
+          moveX = (moveX / len) * player.speed * dt;
+          moveY = (moveY / len) * player.speed * dt;
+          player.x = clamp(player.x + moveX, 20, CW - 20);
+          player.y = clamp(player.y + moveY, CH/2, CH - 30);
+        }
+
+        // Touch / mouse drag movement
+        if (touchActive) {
+          const targetX = clamp(touchX, 20, CW - 20);
+          const targetY = clamp(touchY, CH/2, CH - 30);
+          player.x += (targetX - player.x) * Math.min(1, dt * 12);
+          player.y += (targetY - player.y) * Math.min(1, dt * 12);
+          player.x = clamp(player.x, 20, CW - 20);
+          player.y = clamp(player.y, CH/2, CH - 30);
+        } else if (mouseX !== null && mouseY !== null) {
+          // optional mouse follow if no keys pressed (disabled by default, but let's allow if no key pressed)
+          // Actually let's keep keyboard primary, but if mouse is moving and no keys, follow gently? Not needed.
+        }
+
+        // ----- SHOOTING (hold space or touch auto-fire) -----
+        if (keys['Space'] || touchActive) {
+          if (player.cooldown <= 0) {
+            bullets.push({
+              x: player.x,
+              y: player.y - 18,
+              radius: 4,
+              speedY: -580,
+              color: '#00ffff',
+              damage: 1
+            });
+            // double shot at higher waves
+            if (wave >= 3) {
+              bullets.push({
+                x: player.x - 7,
+                y: player.y - 14,
+                radius: 3,
+                speedY: -560,
+                color: '#88ffff',
+                damage: 1
+              });
+              bullets.push({
+                x: player.x + 7,
+                y: player.y - 14,
+                radius: 3,
+                speedY: -560,
+                color: '#88ffff',
+                damage: 1
+              });
+            }
+            player.cooldown = player.fireRate;
+          }
+        }
+        if (player.cooldown > 0) player.cooldown -= dt;
+
+        // ----- BULLETS UPDATE -----
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          b.y += b.speedY * dt;
+          if (b.y < -20 || b.y > CH + 20 || b.x < -20 || b.x > CW + 20) {
+            bullets.splice(i, 1);
+          }
+        }
+
+        // ----- ENEMY BULLETS UPDATE -----
+        for (let i = enemyBullets.length - 1; i >= 0; i--) {
+          const b = enemyBullets[i];
+          b.x += b.speedX * dt;
+          b.y += b.speedY * dt;
+          if (b.y < -20 || b.y > CH + 20 || b.x < -20 || b.x > CW + 20) {
+            enemyBullets.splice(i, 1);
+          }
+        }
+
+        // ----- WAVE MANAGEMENT -----
+        if (!waveInProgress && !bossActive) {
+          waveTimer -= dt;
+          if (waveTimer <= 0) {
+            if (wave % 5 === 0) {
+              spawnBoss();
+            } else {
+              spawnWave();
+            }
+          }
+        }
+
+        // ----- BOSS UPDATE -----
+        if (boss && bossActive) {
+          // Boss movement
+          boss.phase += dt * 1.5;
+          if (boss.y < 100) {
+            boss.y += boss.speedY * dt;
+          } else {
+            boss.x += Math.sin(boss.phase) * boss.speedX * dt;
+            boss.x = clamp(boss.x, 80, CW - 80);
+          }
+
+          // Boss shooting
+          boss.shootTimer -= dt;
+          if (boss.shootTimer <= 0) {
+            boss.shootTimer = 0.5 + Math.random() * 0.3;
+            // spread shot
+            const baseAngle = Math.atan2(player.y - boss.y, player.x - boss.x);
+            for (let a = -0.3; a <= 0.3; a += 0.15) {
+              const angle = baseAngle + a;
+              enemyBullets.push({
+                x: boss.x,
+                y: boss.y + 20,
+                radius: 6,
+                speedX: Math.cos(angle) * 220,
+                speedY: Math.sin(angle) * 220,
+                color: '#ff8800'
+              });
+            }
+          }
+
+          // Check boss death
+          if (boss.hp <= 0) {
+            score += boss.scoreVal;
+            bossActive = false;
+            boss = null;
+            waveInProgress = false;
+            waveTimer = 2.0;
+            wave++;
+            // Clear enemies on boss death
+            enemies = [];
+            enemyBullets = [];
+          }
+        }
+
+        // ----- ENEMIES UPDATE -----
+        for (let i = enemies.length - 1; i >= 0; i--) {
+          const e = enemies[i];
+          e.y += e.speedY * dt;
+          if (e.type === 'basic' || e.type === 'fast') {
+            e.x += Math.sin(gameTime * e.wobble + e.phase) * 40 * dt;
+            e.x = clamp(e.x, 20, CW - 20);
+          } else if (e.type === 'tank') {
+            e.x += e.speedX * dt;
+            if (e.x < 30 || e.x > CW - 30) e.speedX *= -1;
+            e.x = clamp(e.x, 30, CW - 30);
+          }
+
+          // Enemy shooting
+          e.shootTimer -= dt;
+          if (e.shootTimer <= 0 && e.y > 20 && e.y < CH - 100) {
+            e.shootTimer = 1.5 + Math.random() * 2.5;
+            const angle = Math.atan2(player.y - e.y, player.x - e.x);
+            enemyBullets.push({
+              x: e.x,
+              y: e.y + 10,
+              radius: 5,
+              speedX: Math.cos(angle) * 180,
+              speedY: Math.sin(angle) * 180,
+              color: '#ff4466'
+            });
+          }
+
+          // Remove offscreen enemies (below)
+          if (e.y > CH + 40) {
+            enemies.splice(i, 1);
+            continue;
+          }
+
+          // Check player collision
+          const dx = e.x - player.x, dy = e.y - player.y;
+          if (Math.hypot(dx, dy) < e.radius + player.radius) {
+            gameState = 'gameover';
+            return;
+          }
+        }
+
+        // Check if wave cleared
+        if (waveInProgress && enemies.length === 0 && !bossActive) {
+          waveInProgress = false;
+          wave++;
+          waveTimer = 2.2;
+        }
+
+        // ----- COLLISIONS: PLAYER BULLETS vs ENEMIES -----
+        for (let i = bullets.length - 1; i >= 0; i--) {
+          const b = bullets[i];
+          let bulletUsed = false;
+
+          // vs boss
+          if (boss && bossActive) {
+            const dx = b.x - boss.x, dy = b.y - boss.y;
+            if (Math.hypot(dx, dy) < boss.radius + b.radius) {
+              boss.hp -= b.damage;
+              bulletUsed = true;
+            }
+          }
+
+          // vs enemies
+          if (!bulletUsed) {
+            for (let j = enemies.length - 1; j >= 0; j--) {
+              const e = enemies[j];
+              const dx = b.x - e.x, dy = b.y - e.y;
+              if (Math.hypot(dx, dy) < e.radius + b.radius) {
+                e.hp -= b.damage;
+                bulletUsed = true;
+                if (e.hp <= 0) {
+                  score += e.scoreVal;
+                  enemiesDestroyed++;
+                  enemies.splice(j, 1);
+                }
+                break;
+              }
+            }
+          }
+
+          if (bulletUsed) {
+            bullets.splice(i, 1);
+          }
+        }
+
+        // ----- COLLISIONS: ENEMY BULLETS vs PLAYER -----
+        for (let i = enemyBullets.length - 1; i >= 0; i--) {
+          const b = enemyBullets[i];
+          const dx = b.x - player.x, dy = b.y - player.y;
+          if (Math.hypot(dx, dy) < player.radius + b.radius) {
+            gameState = 'gameover';
+            return;
+          }
+        }
+
+        // ----- BOSS vs PLAYER collision -----
+        if (boss && bossActive) {
+          const dx = boss.x - player.x, dy = boss.y - player.y;
+          if (Math.hypot(dx, dy) < boss.radius + player.radius) {
+            gameState = 'gameover';
+            return;
+          }
+        }
+
+        // ----- STARFIELD UPDATE -----
+        for (let s of stars) {
+          s.y += s.speed * dt;
+          if (s.y > CH + 5) {
+            s.y = -5;
+            s.x = Math.random() * CW;
+          }
+        }
+      }
+
+      // ---------- RENDERING ----------
+      function draw() {
+        ctx.clearRect(0, 0, CW, CH);
+
+        // ----- STARFIELD -----
+        for (let s of stars) {
+          ctx.beginPath();
+          ctx.arc(s.x, s.y, s.radius, 0, Math.PI * 2);
+          ctx.fillStyle = s.color;
+          ctx.globalAlpha = s.brightness;
+          ctx.fill();
+        }
+        ctx.globalAlpha = 1.0;
+
+        // ----- NEBULA GLOW (subtle) -----
+        const grad = ctx.createRadialGradient(CW/2, CH/2, 100, CW/2, CH/2, 500);
+        grad.addColorStop(0, 'rgba(30, 0, 60, 0.15)');
+        grad.addColorStop(1, 'rgba(0, 0, 0, 0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, CW, CH);
+
+        // ----- DRAW PLAYER -----
+        if (gameState === 'playing' && player.active) {
+          ctx.save();
+          ctx.translate(player.x, player.y);
+          // glow
+          ctx.shadowColor = '#00ffff';
+          ctx.shadowBlur = 24;
+          // main triangle
+          ctx.beginPath();
+          ctx.moveTo(0, -22);
+          ctx.lineTo(-16, 12);
+          ctx.lineTo(-6, 6);
+          ctx.lineTo(-6, 18);
+          ctx.lineTo(6, 18);
+          ctx.lineTo(6, 6);
+          ctx.lineTo(16, 12);
+          ctx.closePath();
+          ctx.fillStyle = '#00ccff';
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          // engine glow
+          ctx.shadowBlur = 30;
+          ctx.shadowColor = '#ff00ff';
+          ctx.beginPath();
+          ctx.arc(0, 22, 6, 0, Math.PI * 2);
+          ctx.fillStyle = '#ff88ff';
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // ----- DRAW BULLETS -----
+        for (let b of bullets) {
+          ctx.save();
+          ctx.shadowColor = b.color;
+          ctx.shadowBlur = 15;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.fillStyle = b.color;
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // ----- DRAW ENEMY BULLETS -----
+        for (let b of enemyBullets) {
+          ctx.save();
+          ctx.shadowColor = b.color;
+          ctx.shadowBlur = 15;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, b.radius, 0, Math.PI * 2);
+          ctx.fillStyle = b.color;
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // ----- DRAW ENEMIES -----
+        for (let e of enemies) {
+          ctx.save();
+          ctx.translate(e.x, e.y);
+          ctx.shadowColor = e.color;
+          ctx.shadowBlur = 18;
+          if (e.type === 'tank') {
+            // hexagon
+            ctx.beginPath();
+            for (let i = 0; i < 6; i++) {
+              const a = (i / 6) * Math.PI * 2 - Math.PI/2;
+              const px = Math.cos(a) * e.radius;
+              const py = Math.sin(a) * e.radius;
+              if (i === 0) ctx.moveTo(px, py);
+              else ctx.lineTo(px, py);
+            }
+            ctx.closePath();
+            ctx.fillStyle = e.color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+          } else if (e.type === 'fast') {
+            // diamond
+            ctx.beginPath();
+            ctx.moveTo(0, -e.radius);
+            ctx.lineTo(e.radius * 0.7, 0);
+            ctx.lineTo(0, e.radius);
+            ctx.lineTo(-e.radius * 0.7, 0);
+            ctx.closePath();
+            ctx.fillStyle = e.color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+          } else {
+            // triangle pointing down
+            ctx.beginPath();
+            ctx.moveTo(0, e.radius);
+            ctx.lineTo(-e.radius * 0.8, -e.radius * 0.7);
+            ctx.lineTo(e.radius * 0.8, -e.radius * 0.7);
+            ctx.closePath();
+            ctx.fillStyle = e.color;
+            ctx.fill();
+            ctx.strokeStyle = '#fff';
+            ctx.lineWidth = 1.8;
+            ctx.stroke();
+          }
+          // hp bar for tank
+          if (e.type === 'tank' && e.hp < e.maxHp) {
+            ctx.shadowBlur = 0;
+            ctx.fillStyle = '#333';
+            ctx.fillRect(-20, -e.radius - 10, 40, 4);
+            ctx.fillStyle = '#ffaa00';
+            ctx.fillRect(-20, -e.radius - 10, 40 * (e.hp / e.maxHp), 4);
+          }
+          ctx.restore();
+        }
+
+        // ----- DRAW BOSS -----
+        if (boss && bossActive) {
+          ctx.save();
+          ctx.translate(boss.x, boss.y);
+          ctx.shadowColor = '#ff00ff';
+          ctx.shadowBlur = 35;
+          // outer ring
+          ctx.beginPath();
+          ctx.arc(0, 0, boss.radius, 0, Math.PI * 2);
+          ctx.fillStyle = '#440044';
+          ctx.fill();
+          ctx.strokeStyle = '#ff44ff';
+          ctx.lineWidth = 4;
+          ctx.stroke();
+          // inner core
+          ctx.beginPath();
+          ctx.arc(0, 0, boss.radius * 0.6, 0, Math.PI * 2);
+          ctx.fillStyle = '#ff00aa';
+          ctx.fill();
+          ctx.strokeStyle = '#ffffff';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          // spikes
+          ctx.beginPath();
+          for (let i = 0; i < 8; i++) {
+            const a = (i / 8) * Math.PI * 2 + gameTime * 0.5;
+            const x1 = Math.cos(a) * boss.radius * 0.8;
+            const y1 = Math.sin(a) * boss.radius * 0.8;
+            const x2 = Math.cos(a) * boss.radius * 1.3;
+            const y2 = Math.sin(a) * boss.radius * 1.3;
+            ctx.moveTo(x1, y1);
+            ctx.lineTo(x2, y2);
+          }
+          ctx.strokeStyle = '#ff88ff';
+          ctx.lineWidth = 3;
+          ctx.stroke();
+          // hp bar
+          ctx.shadowBlur = 0;
+          ctx.fillStyle = '#331133';
+          ctx.fillRect(-60, -boss.radius - 25, 120, 8);
+          ctx.fillStyle = '#ff00ff';
+          ctx.fillRect(-60, -boss.radius - 25, 120 * (boss.hp / boss.maxHp), 8);
+          ctx.restore();
+        }
+
+        // ----- UI TEXT -----
+        ctx.save();
+        ctx.shadowBlur = 0;
+        ctx.font = 'bold 22px "Courier New", monospace';
+        ctx.fillStyle = '#00ffff';
+        ctx.shadowColor = '#00ffff';
+        ctx.shadowBlur = 16;
+        ctx.fillText('SCORE: ' + score, 20, 40);
+        ctx.fillStyle = '#ff88ff';
+        ctx.shadowColor = '#ff88ff';
+        ctx.fillText('WAVE: ' + wave, CW - 160, 40);
+
+        // Enemy count / boss indicator
+        if (bossActive) {
+          ctx.fillStyle = '#ff4400';
+          ctx.shadowColor = '#ff4400';
+          ctx.font = 'bold 18px "Courier New", monospace';
+          ctx.fillText('⚠ BOSS', CW/2 - 50, 40);
+        }
+
+        // ----- GAME OVER / START / WIN SCREENS -----
+        ctx.shadowBlur = 0;
+        if (gameState === 'start') {
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.6)';
+          ctx.fillRect(0, 0, CW, CH);
+          ctx.font = 'bold 52px "Courier New", monospace';
+          ctx.fillStyle = '#00ffff';
+          ctx.shadowColor = '#00ffff';
+          ctx.shadowBlur = 30;
+          ctx.textAlign = 'center';
+          ctx.fillText('NEON VOID', CW/2, CH/2 - 60);
+          ctx.font = '22px "Courier New", monospace';
+          ctx.fillStyle = '#ff88ff';
+          ctx.shadowColor = '#ff88ff';
+          ctx.fillText('PRESS SPACE / TAP TO START', CW/2, CH/2 + 30);
+          ctx.font = '16px "Courier New", monospace';
+          ctx.fillStyle = '#aaaaff';
+          ctx.shadowBlur = 0;
+          ctx.fillText('ARROWS / WASD TO MOVE', CW/2, CH/2 + 90);
+          ctx.fillText('HOLD SPACE / TOUCH TO FIRE', CW/2, CH/2 + 120);
+        } else if (gameState === 'gameover') {
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillRect(0, 0, CW, CH);
+          ctx.font = 'bold 52px "Courier New", monospace';
+          ctx.fillStyle = '#ff2266';
+          ctx.shadowColor = '#ff2266';
+          ctx.shadowBlur = 30;
+          ctx.textAlign = 'center';
+          ctx.fillText('GAME OVER', CW/2, CH/2 - 40);
+          ctx.font = '28px "Courier New", monospace';
+          ctx.fillStyle = '#ffffff';
+          ctx.shadowBlur = 20;
+          ctx.fillText('SCORE: ' + score, CW/2, CH/2 + 40);
+          ctx.font = '20px "Courier New", monospace';
+          ctx.fillStyle = '#00ffff';
+          ctx.shadowColor = '#00ffff';
+          ctx.fillText('PRESS SPACE / TAP TO RESTART', CW/2, CH/2 + 110);
+        } else if (gameState === 'win') {
+          ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+          ctx.fillRect(0, 0, CW, CH);
+          ctx.font = 'bold 48px "Courier New", monospace';
+          ctx.fillStyle = '#ffff00';
+          ctx.shadowColor = '#ffff00';
+          ctx.shadowBlur = 40;
+          ctx.textAlign = 'center';
+          ctx.fillText('YOU WIN!', CW/2, CH/2 - 20);
+          ctx.font = '24px "Courier New", monospace';
+          ctx.fillStyle = '#ffffff';
+          ctx.fillText('SCORE: ' + score, CW/2, CH/2 + 60);
+        }
+        ctx.restore();
+        ctx.textAlign = 'left';
+      }
+
+      // ---------- GAME LOOP ----------
+      let lastTime = 0;
+      function gameLoop(timestamp) {
+        const dt = Math.min((timestamp - lastTime) / 1000, 0.05);
+        lastTime = timestamp;
+
+        update(dt);
+        draw();
+        requestAnimationFrame(gameLoop);
+      }
+
+      // ---------- INPUT HANDLERS ----------
+      window.addEventListener('keydown', (e) => {
+        keys[e.code] = true;
+        if (e.code === 'Space') e.preventDefault();
+        if (gameState === 'start' || gameState === 'gameover') {
+          if (e.code === 'Space') {
+            resetGame();
+          }
+        }
+      });
+      window.addEventListener('keyup', (e) => {
+        keys[e.code] = false;
+      });
+
+      // Mouse drag (desktop) - optional but useful
+      canvas.addEventListener('mousemove', (e) => {
+        const rect = canvas.getBoundingClientRect();
+        const scaleX = CW / rect.width;
+        const scaleY = CH / rect.height;
+        mouseX = (e.clientX - rect.left) * scaleX;
+        mouseY = (e.clientY - rect.top) * scaleY;
+        // follow only if playing and not using keys? Actually let's allow it if no movement keys are pressed
+        if (gameState === 'playing') {
+          const useKeys = keys['ArrowLeft'] || keys['ArrowRight'] || keys['ArrowUp'] || keys['ArrowDown'] ||
+                          keys['KeyA'] || keys['KeyD'] || keys['KeyW'] || keys['KeyS'];
+          if (!useKeys && mouseX !== null) {
+            player.x += (mouseX - player.x) * 0.15;
+            player.y += (mouseY - player.y) * 0.15;
+            player.x = clamp(player.x, 20, CW - 20);
+            player.y = clamp(player.y, CH/2, CH - 30);
+          }
+        }
+      });
+      canvas.addEventListener('mouseleave', () => {
+        mouseX = null;
+      });
+
+      // Touch controls
+      function handleTouchStart(e) {
+        e.preventDefault();
+        if (gameState === 'start' || gameState === 'gameover') {
+          resetGame();
+          return;
+        }
+        if (gameState === 'playing') {
+          touchActive = true;
+          const rect = canvas.getBoundingClientRect();
+          const scaleX = CW / rect.width;
+          const scaleY = CH / rect.height;
+          const touch = e.touches[0];
+          touchX = (touch.clientX - rect.left) * scaleX;
+          touchY = (touch.clientY - rect.top) * scaleY;
+        }
+      }
+      function handleTouchMove(e) {
+        e.preventDefault();
+        if (gameState === 'playing' && touchActive) {
+          const rect = canvas.getBoundingClientRect();
+          const scaleX = CW / rect.width;
+          const scaleY = CH / rect.height;
+          const touch = e.touches[0];
+          touchX = (touch.clientX - rect.left) * scaleX;
+          touchY = (touch.clientY - rect.top) * scaleY;
+        }
+      }
+      function handleTouchEnd(e) {
+        e.preventDefault();
+        if (gameState === 'playing') {
+          touchActive = false;
+        }
+      }
+      canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
+      canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
+      canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+      canvas.addEventListener('touchcancel', handleTouchEnd, { passive: false });
+
+      // Also allow click to start
+      canvas.addEventListener('click', (e) => {
+        if (gameState === 'start' || gameState === 'gameover') {
+          resetGame();
+        }
+      });
+
+      // ---------- START ----------
+      gameState = 'start';
+      waveTimer = 0;
+      requestAnimationFrame((t) => {
+        lastTime = t;
+        requestAnimationFrame(gameLoop);
+      });
+    })();
+  </script>
+</body>
+</html>
